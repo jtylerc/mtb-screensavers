@@ -52,7 +52,7 @@ bool Canvas::end() {
     Clip c = clipStack_.back(); clipStack_.pop_back();
     if (c.axis) rt_->PopAxisAlignedClip(); else { rt_->PopLayer(); c.geom->Release(); }
   }
-  HRESULT hr = rt_->EndDraw();
+  HRESULT hr = rt_->EndDraw(); lastEnd_ = hr;
   if (hr == (HRESULT)D2DERR_RECREATE_TARGET) {
     rt_->Release(); rt_ = nullptr; RECT rc; GetClientRect(hwnd_, &rc); resize(rc.right, rc.bottom);
     return false;
@@ -179,6 +179,36 @@ ID2D1StrokeStyle* Canvas::strokeStyleFor(double w) {
   if (FAILED(f_->CreateStrokeStyle(&p, d.data(), (UINT32)d.size(), &st))) return solid_[0];
   dashed_[key] = st;
   return st;
+}
+
+ID2D1GradientStopCollection* Canvas::gradient(const std::vector<Stop>& stops) {
+  std::vector<D2D1_GRADIENT_STOP> g;
+  for (const Stop& st : stops) g.push_back({st.pos, {st.col.r, st.col.g, st.col.b, (float)(st.col.a * globalAlpha)}});
+  ID2D1GradientStopCollection* c = nullptr;
+  rt_->CreateGradientStopCollection(g.data(), (UINT32)g.size(), D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP, &c);
+  return c;
+}
+
+void Canvas::fillLinear(V2 p0, V2 p1, const std::vector<Stop>& stops) {
+  ID2D1PathGeometry* g = build(true, false); if (!g) return;
+  ID2D1GradientStopCollection* sc = gradient(stops);
+  V2 a = ap(p0.x, p0.y), b = ap(p1.x, p1.y);
+  D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES lp{{(float)a.x, (float)a.y}, {(float)b.x, (float)b.y}};
+  ID2D1LinearGradientBrush* br = nullptr;
+  if (sc && SUCCEEDED(rt_->CreateLinearGradientBrush(&lp, nullptr, sc, &br))) { rt_->FillGeometry(g, br, nullptr); br->Release(); }
+  if (sc) sc->Release();
+  g->Release();
+}
+
+void Canvas::fillRadial(V2 c, double rx, double ry, const std::vector<Stop>& stops) {
+  ID2D1PathGeometry* g = build(true, false); if (!g) return;
+  ID2D1GradientStopCollection* sc = gradient(stops);
+  V2 a = ap(c.x, c.y); double k = scaleOf();
+  D2D1_RADIAL_GRADIENT_BRUSH_PROPERTIES rp{{(float)a.x, (float)a.y}, {0, 0}, (float)(rx * k), (float)(ry * k)};
+  ID2D1RadialGradientBrush* br = nullptr;
+  if (sc && SUCCEEDED(rt_->CreateRadialGradientBrush(&rp, nullptr, sc, &br))) { rt_->FillGeometry(g, br, nullptr); br->Release(); }
+  if (sc) sc->Release();
+  g->Release();
 }
 
 void Canvas::stroke() {

@@ -1,4 +1,4 @@
-# Singletrack
+# MTB CAD
 
 A full-suspension mountain bike drawn as a CAD sheet, labelled and dimensioned. It rides a rough trail on working suspension, picks up speed down a chute, launches off a cliff and hits a boulder. The bike comes apart, the parts land on the ground, and then it rebuilds itself and rides on. Each monitor rides its own trail.
 

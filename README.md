@@ -4,7 +4,8 @@ Mountain-bike screensavers for Windows. Each one is a single native `.scr` file 
 
 | | |
 |---|---|
-| [![Singletrack](screensavers/singletrack/docs/assembly.png)](screensavers/singletrack) | **[Singletrack](screensavers/singletrack)**: a mountain bike drawn as a CAD sheet rides a rough trail, launches off a cliff, hits a boulder, comes apart and rebuilds itself. |
+| [![MTB CAD](screensavers/mtb-cad/docs/assembly.png)](screensavers/mtb-cad) | **[MTB CAD](screensavers/mtb-cad)**: a mountain bike drawn as a CAD sheet rides a rough trail, launches off a cliff, hits a boulder, comes apart and rebuilds itself. |
+| [![Forest Ride](screensavers/forest-ride/docs/rays.png)](screensavers/forest-ride) | **[Forest Ride](screensavers/forest-ride)**: the view from the saddle, riding singletrack through a misty forest, hands on the bar. |
 
 ## Install
 
@@ -19,16 +20,16 @@ The build uses [llvm-mingw](https://github.com/mstorsjo/llvm-mingw), a self-cont
 
 ```sh
 LLVM_MINGW=/path/to/llvm-mingw ./build.sh                # all screensavers, or put its bin directory on PATH
-LLVM_MINGW=/path/to/llvm-mingw ./build.sh singletrack    # just one
+LLVM_MINGW=/path/to/llvm-mingw ./build.sh forest-ride    # just one
 ```
 
-Each screensaver is written to `build/<Name>.scr`. The code is standard C++20 against the Windows SDK, so it should also build with Visual Studio, but that hasn't been tried.
+Each screensaver is written to `build/`, named after the name Windows shows for it: `MTB-CAD.scr`, `Forest-Ride.scr`. The code is standard C++20 against the Windows SDK, so it should also build with Visual Studio, but that hasn't been tried.
 
 ## Layout
 
 - `common/` holds what every screensaver shares:
   - `main.cpp` is the Windows screensaver host. It handles the `/s` (full screen), `/p <hwnd>` (preview) and `/c` (settings) modes, opens a window per monitor, ends the screensaver on input and paces frames to the compositor.
-  - `canvas.cpp` is a small subset of the HTML canvas 2D API on top of Direct2D and DirectWrite.
+  - `canvas.cpp` is a small subset of the HTML canvas 2D API on top of Direct2D and DirectWrite, including gradient fills.
   - `scene.h` is the interface a screensaver implements.
 - `screensavers/<name>/` holds one screensaver:
   - Its `Scene` implementation.
@@ -41,7 +42,7 @@ Each screensaver is written to `build/<Name>.scr`. The code is standard C++20 ag
 1. Make a folder under `screensavers/`.
 2. In it, implement `Scene` from `common/scene.h`:
    - Define `CreateScene()`, `kSaverName` and `kSaverAbout`.
-   - Draw with `Canvas` from `common/canvas.h`, as `screensavers/singletrack` does.
+   - Draw with `Canvas` from `common/canvas.h`, as `screensavers/mtb-cad` and `screensavers/forest-ride` do.
 3. Add a `resources.rc` that names the screensaver and includes `../../common/app.manifest`.
 4. Run `./build.sh`. It picks up the new folder automatically.
 

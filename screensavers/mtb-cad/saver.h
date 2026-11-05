@@ -1,4 +1,4 @@
-// One running copy of the Singletrack animation: its own trail, ride and crash, drawn into one window.
+// One running copy of the MTB CAD animation: its own trail, ride and crash, drawn into one window.
 #pragma once
 #include <deque>
 #include <random>

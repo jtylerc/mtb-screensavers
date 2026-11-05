@@ -18,6 +18,8 @@ inline V2 operator*(V2 a, double k) { return {a.x * k, a.y * k}; }
 struct Col { float r, g, b, a; };
 inline Col rgba(int r, int g, int b, double a = 1) { return {r / 255.f, g / 255.f, b / 255.f, (float)a}; }
 
+struct Stop { float pos; Col col; };  // a gradient stop: position 0..1 and colour
+
 enum class Align { Left, Center, Right };
 enum class Baseline { Alphabetic, Top, Middle, Bottom };
 
@@ -34,6 +36,7 @@ class Canvas {
   bool init(ID2D1Factory* f, IDWriteFactory* dw, HWND hwnd);
   bool resize(UINT w, UINT h);
   void begin(); bool end();  // end() returns false when the device was lost and the target has to be recreated
+  HRESULT lastEndResult() const { return lastEnd_; }  // what the last end() got back from Direct2D
 
   void save(); void restore();
   void setTransform(double a, double b, double c, double d, double e, double f);
@@ -49,6 +52,9 @@ class Canvas {
   void roundRect(double x, double y, double w, double h, double r);
   void closePath();
   void fill(bool evenOdd = false); void stroke(); void clip();
+  // fill the current path with a gradient (points and radii in user space, like the path)
+  void fillLinear(V2 p0, V2 p1, const std::vector<Stop>& stops);
+  void fillRadial(V2 c, double rx, double ry, const std::vector<Stop>& stops);
   void fillRect(double x, double y, double w, double h); void strokeRect(double x, double y, double w, double h);
 
   void fillText(const std::string& utf8, double x, double y);
@@ -66,6 +72,7 @@ class Canvas {
   struct Text { IDWriteTextLayout* layout; double width, height, baseline; };
   const Text* text(const std::string& utf8);
   ID2D1StrokeStyle* strokeStyleFor(double w);
+  ID2D1GradientStopCollection* gradient(const std::vector<Stop>& stops);
 
   ID2D1Factory* f_ = nullptr; IDWriteFactory* dw_ = nullptr; HWND hwnd_ = nullptr;
   ID2D1HwndRenderTarget* rt_ = nullptr; ID2D1SolidColorBrush* brush_ = nullptr;
@@ -76,7 +83,7 @@ class Canvas {
   // a path that is exactly one full circle is drawn with the ellipse calls instead of a geometry
   bool circle_ = false; D2D1_ELLIPSE circ_{};
   std::wstring family_;
-  Mat m_; std::vector<double> dash_; int clips_ = 0;
+  Mat m_; std::vector<double> dash_; int clips_ = 0; HRESULT lastEnd_ = S_OK;
   std::vector<State> stack_; std::vector<Clip> clipStack_;
   std::vector<std::vector<D2D1_POINT_2F>> figs_; std::vector<bool> closed_;
 };

@@ -1,5 +1,5 @@
 #define _WIN32_WINNT 0x0A00  // Windows 10: GetDpiForWindow
-// Port of the Singletrack page (web/index.html) to native drawing. The structure, names and comments follow the
+// Port of the MTB CAD page (web/index.html) to native drawing. The structure, names and comments follow the
 // page so the two can be compared side by side; units are millimetres and seconds, bike space is y-up with
 // the rear axle at the origin.
 #include "saver.h"
@@ -106,7 +106,7 @@ std::string upper(std::string s) { for (char& c : s) if (c >= 'a' && c <= 'z') c
 
 /* ---------- setup ---------- */
 Scene* CreateScene() { return new Saver; }
-const wchar_t* const kSaverName = L"Singletrack";
+const wchar_t* const kSaverName = L"MTB CAD";
 const wchar_t* const kSaverAbout = L"A CAD drawing of a mountain bike that rides, crashes and rebuilds itself.";
 
 bool Saver::init(ID2D1Factory* f, IDWriteFactory* dw, HWND hwnd, unsigned seed) {

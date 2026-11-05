@@ -1,0 +1,4 @@
+#include <windows.h>
+// Windows shows string 1 of a .scr as its name in the Screen Saver list
+STRINGTABLE { 1, "Singletrack" }
+1 24 "../../common/app.manifest"

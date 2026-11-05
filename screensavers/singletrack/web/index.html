@@ -1,0 +1,1023 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Singletrack Exploded</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Layout: one full-bleed canvas drawn as a CAD sheet — border with zones, viewport on the left, parts list and title block on the right. Single dark look by choice. */
+  :root {
+    --ground: #0d1316;
+    --line: #d2dadd;
+    --shadow: rgba(0, 0, 0, 0.5);
+    --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body { background: var(--ground); overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  body.idle, body.idle canvas { cursor: none; }
+  .hint {
+    position: fixed; top: calc(40px + env(safe-area-inset-top, 0px)); left: 50%; transform: translateX(-50%);
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--line); text-shadow: 0 1px 6px var(--shadow); background: var(--ground); padding: 4px 10px;
+    pointer-events: none; transition: opacity 1.5s ease; white-space: nowrap;
+  }
+  .fade { opacity: 0; }
+</style>
+
+<canvas id="c" aria-label="Animated screensaver: a CAD drawing of a mountain bike that separates into an exploded view of numbered parts and reassembles" role="img"></canvas>
+<div class="hint" id="hint">Click for full screen · H hides the tables</div>
+
+<script>
+(() => {
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const FONT = '"IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace';
+
+/* ---------- CAD layers ---------- */
+const C = {
+  ground: '#0d1316',
+  line: '#d2dadd',                       // object lines
+  thin: 'rgba(210,218,221,0.5)',          // secondary object lines
+  dim: '#7fa3b0',                         // dimensions, balloons, annotation
+  dimA: a => `rgba(127,163,176,${a})`,
+  center: '#a39478',                      // centre lines and phantom lines
+  centerA: a => `rgba(163,148,120,${a})`,
+  grid: 'rgba(127,163,176,0.06)',
+  border: 'rgba(210,218,221,0.6)',
+};
+const DASH_CENTER = [16, 3, 3, 3], DASH_PHANTOM = [18, 3, 3, 3, 3, 3];
+
+let W, H, dpr, S, S0 = 1, zoom = 1, U = 1, A, wide, panel, showTables = true;
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  wide = W >= 900 && W / H > 1.15;
+  const mo = W < 600 ? 8 : 12, mi = W < 600 ? 22 : 30;
+  frameR = { mo, mi };
+  const fx0 = mi, fy0 = mi, fx1 = W - mi, fy1 = H - mi;
+  if (wide) {
+    const T = Math.max(300, Math.min(360, W * 0.21));
+    panel = { x0: fx1 - T, x1: fx1, y0: fy0, y1: fy1 };
+    A = { x: fx0 + 10, y: fy0 + 10, w: panel.x0 - fx0 - 20, h: fy1 - fy0 - 20 };
+  } else {
+    panel = { x0: fx0, x1: fx1, y0: fy1 - 62, y1: fy1 };
+    A = { x: fx0 + 6, y: fy0 + 6, w: fx1 - fx0 - 12, h: panel.y0 - fy0 - 12 };
+  }
+  A.cx = A.x + A.w / 2; A.cy = A.y + A.h / 2;
+  S0 = Math.min(A.w * 0.88 / 2120, A.h * 0.88 / 1400); S = S0 * zoom;
+  layoutSlots();
+}
+let frameR;
+
+/* ---------- drawing helpers (millimetres, bike space, y up) ---------- */
+const px = n => n * U;
+const lerp = (a, b, t) => a + (b - a) * t;
+const lerp2 = (a, b, t) => [lerp(a[0], b[0], t), lerp(a[1], b[1], t)];
+const along = (a, dir, d) => [a[0] + dir[0] * d, a[1] + dir[1] * d];
+const unit = (a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy); return [dx / l, dy / l, l]; };
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const smooth = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+function seg(a, b, w, col) { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.stroke(); }
+function ring(c, r, w, col) { ctx.strokeStyle = col; ctx.lineWidth = w; ctx.beginPath(); ctx.arc(c[0], c[1], r, 0, Math.PI * 2); ctx.stroke(); }
+function disc(c, r, col) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(c[0], c[1], r, 0, Math.PI * 2); ctx.fill(); }
+// solid outline shape: filled with ground (hides what is behind), edged with object line
+function shape(build, edge = 1.3) { ctx.beginPath(); build(); ctx.fillStyle = C.ground; ctx.fill('evenodd'); ctx.strokeStyle = C.line; ctx.lineWidth = px(edge); ctx.stroke(); }
+function circ(c, r, edge = 1.3) { shape(() => ctx.arc(c[0], c[1], r, 0, Math.PI * 2), edge); }
+// tubes drawn as two edges: wide object line, then ground core
+function tubes(list, cap = 'round') {
+  ctx.lineCap = cap;
+  for (const [a, b, w] of list) seg(a, b, w + px(2.6), C.line);
+  for (const [a, b, w] of list) seg(a, b, w, C.ground);
+  ctx.lineCap = 'round';
+}
+function strokeOutlined(build, w) {
+  ctx.beginPath(); build(); ctx.strokeStyle = C.line; ctx.lineWidth = w + px(2.4); ctx.stroke();
+  ctx.strokeStyle = C.ground; ctx.lineWidth = w; ctx.stroke();
+}
+function centerMark(r) {
+  ctx.save(); ctx.setLineDash(DASH_CENTER.map(px)); ctx.strokeStyle = C.center; ctx.lineWidth = px(0.8);
+  ctx.beginPath(); ctx.moveTo(-r, 0); ctx.lineTo(r, 0); ctx.moveTo(0, -r); ctx.lineTo(0, r); ctx.stroke(); ctx.restore();
+}
+
+/* ---------- bike geometry (mm). Rear axle at origin. 29er, 65° head angle, 44 mm fork offset ---------- */
+const HA = 65 * Math.PI / 180, HDIR = [Math.cos(HA), -Math.sin(HA)], HPERP = [Math.sin(HA), Math.cos(HA)];
+const REAR = [0, 0], BB = [440, -30];
+// 600 mm axle-to-crown (real 160 mm 29er forks run ~580-600) so the tyre clears the crown and down tube at full travel.
+// The head tube sits on the same steering axis, raised along it, so the wheelbase and head angle don't change.
+const FORK_EXT = 120, FX_OFF = [-HDIR[0] * FORK_EXT, -HDIR[1] * FORK_EXT], FX = p => [p[0] + FX_OFF[0], p[1] + FX_OFF[1]];
+const HT_TOP = FX([985, 560]), HT_BOT = along(HT_TOP, HDIR, 150), CROWN = along(HT_TOP, HDIR, 160);
+const FRONT = (() => { const t = (CROWN[1] + 44 * HPERP[1]) / -HDIR[1]; const p = along(along(CROWN, HDIR, t), HPERP, 44); return [Math.round(p[0]), 0]; })();
+const ST = [325, 480], TT_END = along(HT_TOP, HDIR, 40), DT_END = along(HT_TOP, HDIR, 118);
+const PIVOT = [470, 40], ROCK = [[360, 300], [400, 262], [478, 326]];
+const SHOCK_A = [640, 135], SHOCK_B = ROCK[2];
+const POST_DIR = (() => { const u = unit(BB, ST); return [u[0], u[1]]; })();
+const SEAT_ANGLE = Math.atan2(ST[1] - BB[1], BB[0] - ST[0]) * 180 / Math.PI;
+
+const SHOCK_L0 = unit(SHOCK_A, ROCK[2])[2];
+const FORK_DIR = (() => { const u = unit(CROWN, FRONT); return [u[0], u[1]]; })();
+const rotAbout = (p, c, a) => { const dx = p[0] - c[0], dy = p[1] - c[1]; return [c[0] + dx * Math.cos(a) - dy * Math.sin(a), c[1] + dx * Math.sin(a) + dy * Math.cos(a)]; };
+
+/* ---------- ride simulation (mm, s): sprung frame with heave + pitch on two spring-dampers ---------- */
+const COMB = [647, 0], GRAV = 9810, V = 3000, SLOWMO = 0.55, R_TIRE = 385;
+const TRAVEL_F = 160, TRAVEL_R = 150, SAG_F = 48, SAG_R = 45;
+const KF = GRAV / (2 * SAG_F), KR = GRAV / (2 * SAG_R), DAMP = 7.5, RG2 = 260000;
+const ride = { X: 0, v: V, z: 0, vz: 0, th: 0, vth: 0, sf: SAG_F, sr: SAG_R, camZ: 0, trail: null, segs: [] };
+let camX = 0, camZ = 0, camFrom = [0, 0], crashZoom = 1, debris = [], tb = null;
+function rideReset(baseY = 0) { ride.v = V; ride.z = baseY + R_TIRE - (SAG_F + SAG_R) / 2; ride.vz = 0; ride.th = 0; ride.vth = 0; ride.sf = SAG_F; ride.sr = SAG_R; ride.camZ = ride.z; ride.cf = ride.cr = baseY + R_TIRE; }
+rideReset();
+let trailSeed = 1;
+const hs2 = n => { const s = Math.sin(n * 127.1 + 917.3) * 43758.5453; return s - Math.floor(s); }; // fixed seed (soil stones)
+const hsh = n => { const s = Math.sin(n * 127.1 + trailSeed * 311.7) * 43758.5453; return s - Math.floor(s); };
+// piecewise-linear value noise: straight facets between random heights, so the profile reads as broken ground
+const lin = (u, cell, k) => { const i = Math.floor(u / cell), f = u / cell - i; return lerp(hsh(i * 7.13 + k), hsh((i + 1) * 7.13 + k), f) * 2 - 1; };
+const rough = u => 105 * lin(u, 2100, 1) + 55 * lin(u, 700, 2) + 27 * lin(u, 230, 3) + 12 * lin(u, 85, 4) + 5 * lin(u, 31, 5);
+const GRADE = 0.07; // the trail falls 7 %
+function rockH(u, T) { // angular rocks: steep face, broken top, back slope
+  if (!T || u <= 0 || u >= T.len) return 0;
+  trailSeed = T.seed;
+  const env = smooth(0, 1500, u), cell = 850, k = Math.floor(u / cell);
+  let h = 0;
+  for (let j = k - 1; j <= k + 1; j++) {
+    if (j < 2 || hsh(j + 0.11) < 0.45 || j * cell > T.len - 2300) continue;
+    const w1 = 90 + hsh(j + 0.3) * 130, wt = 70 + hsh(j + 0.5) * 260, w2 = 90 + hsh(j + 0.7) * 220;
+    const s0 = j * cell + hsh(j + 0.9) * cell * 0.4, hr = (hsh(j + 1.3) < 0.3 ? 35 + hsh(j + 1.7) * 30 : 75 + hsh(j + 1.1) * 95) * env;
+    const d = u - s0;
+    if (d > 0 && d < w1 + wt + w2) {
+      const top = hr * (1 + 0.18 * lin(d, 45, j * 3.1));
+      h += d < w1 ? top * (d / w1) : d < w1 + wt ? top * (1 - 0.15 * (d - w1) / wt) : top * 0.85 * (1 - (d - w1 - wt) / w2);
+    }
+  }
+  return h;
+}
+function trailH(u, T) {
+  trailSeed = T.seed;
+  const env = smooth(0, 1500, u), calm = 1 - 0.65 * smooth(T.len - 2600, T.len - 1700, u);
+  let h = -GRADE * Math.max(0, u - 1200) + env * calm * rough(u) + rockH(u, T);
+  h -= 0.22 * clamp(u - (T.len - 7000), 0, 4200);                 // steep chute before the run-in to the kicker
+  h += 230 * clamp((u - (T.len - 1500)) / 1450, 0, 1);         // straight slab kicker before the drop
+  return h;
+}
+// The trail is a chain of segments; each starts flat at the height where the last one ended:
+// flat lead-in, rough descending trail, kicker, craggy cliff, boulder, then a flat run-out.
+const LEAD = 3000;
+function segAt(x) { const g = ride.segs; for (let i = g.length - 1; i >= 0; i--) if (x >= g[i].s) return g[i]; return null; }
+function groundH(x) {
+  const T = segAt(x); if (!T) return ride.segs.length ? ride.segs[0].y0 : 0;
+  trailSeed = T.seed;
+  const u = x - T.start; if (u <= 0) return T.y0;
+  if (u < T.len) return T.y0 + trailH(u, T);
+  const top = trailH(T.len, T), bottom = top - T.drop, v = u - T.len;
+  if (v < FACE) { // craggy cliff face: broken steps and spikes on the way down
+    const t = v / FACE, crag = (110 * lin(v, 75, 9) + 50 * lin(v, 29, 10) + 20 * lin(v, 12, 11)) * Math.sin(Math.PI * Math.min(1, t * 1.15));
+    return T.y0 + lerp(top, bottom, Math.pow(t, 0.6)) + crag;
+  }
+  return T.y0 + belowCliff(u, v, bottom, T) + boulderTop(v, T);
+}
+const FACE = 1000;
+const belowCliff = (u, v, bottom, T) => { const R = runout(T), k = 1 - smooth(R, R + 1200, v); return bottom - GRADE * (Math.min(v, R + 600) - FACE) + 0.7 * rough(u) * k; };
+// a big angular boulder in the landing zone (offsets in mm from the lip; heights above the ground it sits in)
+const BX_OFFSET = -250; // aim the boulder's leading face at the predicted touchdown
+const BOULDER_X = 2050, BOULDER = [[0, 0], [60, 150], [120, 250], [175, 270], [250, 400], [340, 455], [430, 470], [520, 440], [600, 455], [690, 360], [780, 230], [860, 120], [930, 0]];
+// the boulder sits where the bike will land: placed at takeoff from the bike's speed (T.bx), default BOULDER_X
+const runout = T => (T.bx || BOULDER_X) + 930 + 400; // ground flattens out past the boulder
+function boulderTop(v, T) {
+  const d = v - (T.bx || BOULDER_X); if (d <= 0 || d >= 930) return 0;
+  let i = 0; while (BOULDER[i + 1][0] < d) i++;
+  const [x0, y0] = BOULDER[i], [x1, y1] = BOULDER[i + 1];
+  return lerp(y0, y1, (d - x0) / (x1 - x0));
+}
+function contactY(x) { // height of the wheel centre resting on the ground under x
+  let m = -1e9;
+  for (let i = -12; i <= 12; i++) { const dx = i / 12 * R_TIRE * 0.92, y = groundH(x + dx) + Math.sqrt(R_TIRE * R_TIRE - dx * dx); if (y > m) m = y; }
+  return m;
+}
+function rideStep(h) {
+  if (!(h > 0)) return;
+  const c =Math.cos(ride.th), s = Math.sin(ride.th);
+  const fa = [ride.X + 648 * c, ride.z + 648 * s], ra = [ride.X - 647 * c, ride.z - 647 * s];
+  // tire give: the contact the suspension feels follows the ground with a short lag (rises softly, drops freely)
+  const tf = contactY(fa[0]), tr = contactY(ra[0]), tc = Math.min(1, h / 0.03);
+  ride.cf = tf < ride.cf ? tf : ride.cf + (tf - ride.cf) * tc;
+  ride.cr = tr < ride.cr ? tr : ride.cr + (tr - ride.cr) * tc;
+  const sf = ride.cf - fa[1], sr = ride.cr - ra[1];
+  const force = (sNow, sPrev, k, trav) => {
+    if (sNow <= 0) return 0;
+    const ds = sPrev > 0 ? (sNow - sPrev) / h : 0;
+    // light compression damping, firmer rebound, and a blow-off cap so sharp edges don't kick the frame
+    const damp = clamp((ds > 0 ? 0.7 : 2.6) * Math.sqrt(k) * ds, -0.7 * GRAV, 0.7 * GRAV);
+    return Math.max(0, k * sNow + damp + (sNow > trav ? 40 * k * (sNow - trav) : 0));
+  };
+  const Ff = force(sf, ride.sf, KF, TRAVEL_F), Fr = force(sr, ride.sr, KR, TRAVEL_R);
+  ride.vz += (Ff + Fr - GRAV) * h;
+  if (Ff > 0 && Fr > 0) ride.vz *= 1 - 2.5 * h;                // rider's legs soak up heave while both wheels are down
+  ride.z += ride.vz * h;
+  ride.vth += ((Ff * 648 - Fr * 647) * c / RG2) * h; ride.vth *= 1 - (Ff > 0 && Fr > 0 ? 6 : 1.5) * h; ride.th = clamp(ride.th + ride.vth * h, -0.45, 0.45);
+  // keep both tires on the ground while riding: if the ground falls away faster than the fork or shock can
+  // extend, the rider weights that end and the frame follows it down. Only past the kicker lip can a wheel leave.
+  const lip = ride.trail ? ride.trail.start + ride.trail.len - 30 : Infinity, L = 1295;
+  // A wheel that has just rolled off the crest of a rock may float briefly (up to 60 mm) before it touches down.
+  const offRock = x => { const T = ride.trail; if (!T) return 0; const u = x - T.start, g = rockH(u, T); let top = g; for (let k = 1; k <= 8; k++) top = Math.max(top, rockH(u - k * 50, T)); return top - g > 110 ? Math.min(60, (top - g) * 0.45) : 0; };
+  let gf = sf, gr = sr;
+  if (fa[0] < lip && gf < 0) {
+    const allow = offRock(fa[0]);
+    if (gf < -allow) {
+      const d = -gf - allow; ride.z -= d * 647 / L; ride.th -= d / L; gf = -allow;
+      const v = ride.vz + 648 * ride.vth; if (v > 0) { ride.vz -= v * 647 / L; ride.vth -= v / L; }
+    }
+  }
+  if (ra[0] < lip && gr < 0) {
+    const allow = offRock(ra[0]);
+    if (gr < -allow) {
+      const d = -gr - allow; ride.z -= d * 648 / L; ride.th += d / L; gr = -allow;
+      const v = ride.vz - 647 * ride.vth; if (v > 0) { ride.vz -= v * 648 / L; ride.vth += v / L; }
+    }
+  }
+  // speed: gravity along the slope accelerates the bike; on gentler ground the rider settles back toward cruising speed
+  if (Ff > 0 || Fr > 0) {
+    const slope = (groundH(ride.X + 600) - groundH(ride.X - 600)) / 1200;
+    ride.v = clamp(ride.v + (-GRAV * slope * 0.9 + (V - ride.v) * 0.35) * h, 1500, 9000);
+  }
+  ride.sf = gf; ride.sr = gr; ride.X += ride.v * h;
+}
+// run the ride physics ahead on a copy of the state (no boulder) to find where the front wheel lands
+function predictTouchdown(cliff, T) {
+  const keys = ['X', 'v', 'z', 'vz', 'th', 'vth', 'sf', 'sr', 'cf', 'cr'], saved = keys.map(k => ride[k]);
+  T.bx = 1e7; let at = 2600;
+  for (let i = 0; i < 1500; i++) {
+    rideStep(0.001);
+    const fx = ride.X + 648 * Math.cos(ride.th);
+    if (fx > cliff + 520 && ride.sf > 0) { at = fx - cliff; break; }
+  }
+  keys.forEach((k, i) => ride[k] = saved[i]);
+  return at;
+}
+function pose() {
+  const tf = clamp(ride.sf, 0, TRAVEL_F), tr = clamp(ride.sr, 0, TRAVEL_R), phi = -tr / 470, psi = 2 * phi;
+  return { tf, tr, phi, front: along(FRONT, FORK_DIR, -tf), rear: rotAbout(REAR, PIVOT, phi),
+    rock0: rotAbout(ROCK[0], ROCK[1], psi), rock2: rotAbout(ROCK[2], ROCK[1], psi) };
+}
+
+let wheelRot = 0, crank = 0, time = 0, P = pose();
+
+function drawWheel(front) {
+  shape(() => { ctx.arc(0, 0, 382, 0, Math.PI * 2); ctx.arc(0, 0, 318, 0, Math.PI * 2, true); }, 1.4);
+  ctx.strokeStyle = C.line; ctx.lineWidth = px(1); ctx.beginPath();
+  const n = front ? 46 : 42;
+  for (let i = 0; i < n; i++) {
+    const a = wheelRot + i * Math.PI * 2 / n, r1 = i % 2 ? 392 : 388, da = 0.022;
+    ctx.moveTo(Math.cos(a - da) * 382, Math.sin(a - da) * 382); ctx.lineTo(Math.cos(a - da) * r1, Math.sin(a - da) * r1);
+    ctx.lineTo(Math.cos(a + da) * r1, Math.sin(a + da) * r1); ctx.lineTo(Math.cos(a + da) * 382, Math.sin(a + da) * 382);
+  }
+  ctx.stroke();
+  ring([0, 0], 305, px(1.1), C.line); ring([0, 0], 292, px(0.8), C.thin);
+  ctx.strokeStyle = C.thin; ctx.lineWidth = px(0.6); ctx.beginPath();
+  for (let i = 0; i < 32; i++) {
+    const a = wheelRot + i * Math.PI * 2 / 32, b = a + (i % 2 ? 0.32 : -0.32);
+    ctx.moveTo(Math.cos(a) * 34, Math.sin(a) * 34); ctx.lineTo(Math.cos(b) * 291, Math.sin(b) * 291);
+  }
+  ctx.stroke();
+  circ([0, 0], 34, 1.3); circ([0, 0], 11, 1);
+  centerMark(420);
+}
+function drawRotor(R) {
+  ctx.save(); ctx.rotate(wheelRot);
+  shape(() => { ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.arc(0, 0, R * 0.78, 0, Math.PI * 2, true); }, 1.1);
+  for (let i = 0; i < 24; i++) { const a = i * Math.PI * 2 / 24; ring([Math.cos(a) * R * 0.89, Math.sin(a) * R * 0.89], R * 0.034, px(0.7), C.thin); }
+  for (let i = 0; i < 6; i++) {
+    const a = i * Math.PI / 3;
+    strokeOutlined(() => {
+      ctx.moveTo(Math.cos(a) * R * 0.24, Math.sin(a) * R * 0.24);
+      ctx.quadraticCurveTo(Math.cos(a + 0.35) * R * 0.55, Math.sin(a + 0.35) * R * 0.55, Math.cos(a + 0.5) * R * 0.79, Math.sin(a + 0.5) * R * 0.79);
+    }, R * 0.06);
+  }
+  circ([0, 0], R * 0.24, 1.1);
+  for (let i = 0; i < 6; i++) { const a = i * Math.PI / 3 + 0.5; ring([Math.cos(a) * R * 0.17, Math.sin(a) * R * 0.17], R * 0.025, px(0.7), C.line); }
+  ctx.restore();
+  centerMark(R * 1.15);
+}
+const COGS = [10, 12, 14, 16, 18, 21, 24, 28, 32, 36, 42, 52];
+function drawCassette() {
+  ctx.save(); ctx.rotate(wheelRot);
+  circ([0, 0], 52 * 2.02 + 5, 1.2);
+  for (let i = COGS.length - 1; i >= 0; i--) ring([0, 0], COGS[i] * 2.02, px(i % 2 ? 0.7 : 1), i % 2 ? C.thin : C.line);
+  ctx.strokeStyle = C.line; ctx.lineWidth = px(0.8); ctx.beginPath();
+  for (let k = 0; k < 52; k++) { const a = k * Math.PI * 2 / 52, r = 52 * 2.02 + 5; ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r); ctx.lineTo(Math.cos(a) * (r + 5), Math.sin(a) * (r + 5)); }
+  ctx.stroke();
+  circ([0, 0], 15, 1); ctx.restore();
+  centerMark(130);
+}
+function drawCrankset() {
+  const N = 32, r = N * 2.02;
+  ctx.save(); ctx.rotate(crank);
+  shape(() => {
+    for (let k = 0; k < N * 2; k++) { const a = k * Math.PI / N, rr = k % 2 ? r - 4 : r + 6; ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); }
+    ctx.closePath(); ctx.moveTo(r * 0.62, 0); ctx.arc(0, 0, r * 0.62, 0, Math.PI * 2, true);
+  }, 1.2);
+  ring([0, 0], r - 10, px(0.7), C.thin);
+  for (let i = 0; i < 4; i++) { const a = i * Math.PI / 2 + 0.4; ring([Math.cos(a) * r * 0.72, Math.sin(a) * r * 0.72], 4.5, px(0.8), C.line); }
+  ctx.restore();
+  const end = [Math.cos(crank) * 170, Math.sin(crank) * 170];
+  tubes([[[0, 0], end, 30]]);
+  circ([0, 0], 24, 1.2); circ([0, 0], 10, 0.9);
+  shape(() => ctx.roundRect(end[0] - 55, end[1] - 10, 110, 20, 5), 1.2);
+  ctx.strokeStyle = C.line; ctx.lineWidth = px(0.9); ctx.beginPath();
+  for (let k = -2; k <= 2; k++) { ctx.moveTo(end[0] + k * 22, end[1] + 10); ctx.lineTo(end[0] + k * 22, end[1] + 17); ctx.moveTo(end[0] + k * 22, end[1] - 10); ctx.lineTo(end[0] + k * 22, end[1] - 17); }
+  ctx.stroke(); ring(end, 5, px(0.8), C.thin);
+  centerMark(90);
+}
+function drawDerailleur() {
+  const up = [15, -75], lo = [40, -145];
+  ctx.save(); ctx.translate(...PIVOT); ctx.rotate(P.phi); ctx.translate(-PIVOT[0], -PIVOT[1]); // rides on the swingarm
+  tubes([[[18, -12], [62, -36], 20]]);
+  ctx.save(); ctx.translate(62, -50); ctx.rotate(-0.5);
+  shape(() => ctx.roundRect(-28, -18, 56, 36, 8), 1.2); ring([0, 0], 7, px(0.8), C.line); ctx.restore();
+  tubes([[[60, -60], up, 12]]);
+  const d = unit(up, lo);
+  ctx.save(); ctx.translate(up[0], up[1]); ctx.rotate(Math.atan2(d[1], d[0]));
+  shape(() => ctx.roundRect(-22, -22, d[2] + 44, 44, 22), 1.2); ctx.restore();
+  for (const j of [up, lo]) {
+    circ(j, 15, 1);
+    ctx.strokeStyle = C.line; ctx.lineWidth = px(0.8); ctx.beginPath();
+    for (let k = 0; k < 12; k++) { const a = crank * 5 + k * Math.PI / 6; ctx.moveTo(j[0] + Math.cos(a) * 15, j[1] + Math.sin(a) * 15); ctx.lineTo(j[0] + Math.cos(a) * 19, j[1] + Math.sin(a) * 19); }
+    ctx.stroke(); ring(j, 4, px(0.8), C.line);
+  }
+  ctx.restore();
+}
+function drawFrame() {
+  tubes([[BB, ST, 38], [ST, TT_END, 36], [BB, DT_END, 56], [along(HT_TOP, HDIR, -6), along(HT_BOT, HDIR, 6), 50], [[ST[0] + 10, ST[1] - 40], [ST[0] + 120, ST[1] - 20], 26]]);
+  circ(BB, 30, 1.3); ring(BB, 10, px(0.8), C.thin);
+  ring(PIVOT, 13, px(1), C.line); ring(ROCK[1], 11, px(1), C.line); ring(SHOCK_A, 13, px(1), C.line);
+  ctx.save(); ctx.setLineDash([px(6), px(4)]);
+  const dd = unit(BB, DT_END); seg(along(BB, dd, 70), along(BB, dd, 560), px(0.8), C.thin); ctx.restore(); // hidden line: internal cable
+}
+function drawSwingarm() {
+  const R = P.rear, r0 = P.rock0, r2 = P.rock2;
+  tubes([[PIVOT, R, 34], [R, r0, 28]]);
+  shape(() => { ctx.moveTo(...r0); ctx.lineTo(...ROCK[1]); ctx.lineTo(...r2); ctx.closePath(); }, 1.3);
+  for (const p of [r0, ROCK[1], r2]) ring(p, 9, px(1), C.line);
+  circ(R, 26, 1.3); circ(PIVOT, 13, 1);
+}
+function drawShock() {
+  const [dx, dy, L] = unit(SHOCK_A, P.rock2), L0 = SHOCK_L0, perch = L - L0 * 0.14;
+  ctx.save(); ctx.translate(...SHOCK_A); ctx.rotate(Math.atan2(dy, dx));
+  shape(() => ctx.roundRect(14, -17, L0 * 0.55, 34, 6), 1.3);
+  shape(() => ctx.rect(L0 * 0.55, -7, Math.max(2, perch - L0 * 0.55), 14), 0.9);
+  shape(() => ctx.roundRect(perch, -20, 22, 40, 4), 1.2);
+  shape(() => ctx.roundRect(L0 * 0.12, -22, 16, 44, 3), 1.2);
+  const s0 = L0 * 0.18, s1 = perch, coils = 8;
+  ctx.lineWidth = px(1.1); ctx.strokeStyle = C.line; ctx.beginPath();
+  for (let k = 0; k <= coils * 2; k += 2) { const x = lerp(s0, s1, k / (coils * 2)), x2 = lerp(s0, s1, (k + 1) / (coils * 2)); ctx.moveTo(x, -30); ctx.lineTo(Math.min(x2, s1), 30); }
+  ctx.stroke();
+  ctx.strokeStyle = C.thin; ctx.lineWidth = px(0.7); ctx.setLineDash([px(4), px(3)]); ctx.beginPath(); // hidden back of each coil
+  for (let k = 1; k <= coils * 2; k += 2) { const x = lerp(s0, s1, k / (coils * 2)), x2 = lerp(s0, s1, (k + 1) / (coils * 2)); ctx.moveTo(x, 30); ctx.lineTo(Math.min(x2, s1), -30); }
+  ctx.stroke(); ctx.setLineDash([]);
+  circ([0, 0], 13, 1.1); circ([L, 0], 13, 1.1);
+  ctx.save(); ctx.setLineDash(DASH_CENTER.map(px)); seg([-30, 0], [L + 30, 0], px(0.8), C.center); ctx.restore();
+  ctx.restore();
+}
+function drawFork() {
+  const [dx, dy, L] = unit(CROWN, FRONT), dir = [dx, dy], c = P.tf, n = [-dir[1], dir[0]];
+  tubes([[CROWN, HT_TOP, 30]], 'butt');
+  const lowTop = along(CROWN, dir, L * 0.4 - c), axle = along(FRONT, dir, -c);
+  tubes([[along(CROWN, dir, 18), along(lowTop, dir, 12), 36]], 'butt');
+  tubes([[lowTop, along(axle, dir, -8), 54]], 'butt');
+  seg(along(along(lowTop, dir, 14), n, -27), along(along(lowTop, dir, 14), n, 27), px(0.8), C.thin); // seal
+  tubes([[along(along(CROWN, n, -48), dir, 8), along(along(CROWN, n, 48), dir, 8), 32]], 'butt');
+  ctx.save(); ctx.translate(...along(axle, dir, -70)); ctx.rotate(Math.atan2(dy, dx));
+  shape(() => ctx.roundRect(-30, -44, 60, 26, 6), 1.1); ctx.restore();
+  circ(axle, 22, 1.2);
+  ctx.save(); ctx.setLineDash(DASH_CENTER.map(px)); seg(along(HT_TOP, HDIR, -60), along(CROWN, dir, L * 0.95), px(0.8), C.center); ctx.restore();
+}
+function drawCockpit() {
+  const stemEnd = FX([1040, 585]);
+  tubes([[HT_TOP, stemEnd, 34]]);
+  circ(stemEnd, 22, 1.3); ring(stemEnd, 15, px(0.8), C.thin);
+  tubes([[stemEnd, FX([1002, 612]), 34]]);
+  tubes([[FX([1028, 593]), FX([1036, 589]), 38]], 'butt');
+  seg(FX([1022, 590]), FX([1102, 566]), px(1.4), C.line);
+  ring(FX([1026, 594]), 9, px(1), C.line);
+}
+function drawDropper() {
+  const outerTop = along(ST, POST_DIR, 70), top = along(ST, POST_DIR, 185);
+  tubes([[along(ST, POST_DIR, -10), outerTop, 34]], 'butt');
+  tubes([[outerTop, top, 27]], 'butt');
+  tubes([[along(ST, POST_DIR, -6), along(ST, POST_DIR, 16), 46]], 'butt');
+  for (const d of [100, 140]) { const p = along(ST, POST_DIR, d); seg(along(p, [POST_DIR[1], -POST_DIR[0]], -10), along(p, [POST_DIR[1], -POST_DIR[0]], 10), px(0.7), C.thin); }
+  ctx.save(); ctx.translate(...top);
+  shape(() => { ctx.moveTo(-150, 18); ctx.quadraticCurveTo(-150, 46, -115, 44); ctx.quadraticCurveTo(0, 30, 150, 28); ctx.quadraticCurveTo(170, 24, 160, 14); ctx.quadraticCurveTo(20, 10, -130, 6); ctx.closePath(); }, 1.3);
+  seg([-95, 8], [85, 10], px(0.8), C.thin);
+  ctx.restore();
+}
+function arcPts(c, r, a0, a1, n = 10) { const out = []; for (let i = 0; i <= n; i++) { const a = lerp(a0, a1, i / n); out.push([c[0] + Math.cos(a) * r, c[1] + Math.sin(a) * r]); } return out; }
+function drawChain(alpha) {
+  const ringR = 32 * 2.02, cogR = 21 * 2.02, R = P.rear;
+  const up = rotAbout([15, -75], PIVOT, P.phi), lo = rotAbout([40, -145], PIVOT, P.phi);
+  const pts = [[R[0], R[1] + cogR], [BB[0], BB[1] + ringR], ...arcPts(BB, ringR, Math.PI / 2, -Math.PI / 2, 12),
+    ...arcPts(lo, 15, -Math.PI / 2, -Math.PI, 5), ...arcPts(up, 15, -0.2, Math.PI * 0.6, 5), ...arcPts(R, cogR, -Math.PI / 2, -Math.PI * 1.5, 14)];
+  const path = () => { ctx.moveTo(...pts[0]); for (const p of pts.slice(1)) ctx.lineTo(...p); };
+  ctx.globalAlpha = alpha; ctx.lineJoin = 'round';
+  strokeOutlined(path, 9);
+  ctx.beginPath(); path(); ctx.setLineDash([px(1), 12.7 - px(1)]); ctx.lineDashOffset = crank * ringR;
+  ctx.strokeStyle = C.line; ctx.lineWidth = 9; ctx.stroke();
+  ctx.setLineDash([]); ctx.lineDashOffset = 0; ctx.globalAlpha = 1;
+}
+
+/* ---------- parts list ---------- */
+const PARTS = [
+  { id: 'frame', home: [690, 260], r: 430, draw: drawFrame, name: 'Front triangle', spec: 'HA 65° · SA 77°' },
+  { id: 'swingarm', home: [250, 150], r: 260, draw: drawSwingarm, name: 'Rear linkage', spec: '150 mm travel' },
+  { id: 'shock', home: lerp2(SHOCK_A, SHOCK_B, 0.5), r: 130, draw: drawShock, name: 'Coil shock', spec: '205 × 65 mm' },
+  { id: 'fork', home: lerp2(CROWN, FRONT, 0.45), r: 260, draw: drawFork, name: 'Fork', spec: '160 mm · 44 off' },
+  { id: 'frontWheel', home: FRONT, hp: () => P.front, r: 392, draw: () => drawWheel(true), name: 'Front wheel', spec: '29 × 2.5 in, 32H', local: true },
+  { id: 'rearWheel', home: REAR, hp: () => P.rear, r: 392, draw: () => drawWheel(false), name: 'Rear wheel', spec: '29 × 2.4 in, 32H', local: true },
+  { id: 'rotorF', home: FRONT, hp: () => P.front, r: 104, draw: () => drawRotor(101.5), name: 'Front rotor', spec: 'Ø203 · 6-bolt', local: true },
+  { id: 'rotorR', home: REAR, hp: () => P.rear, r: 92, draw: () => drawRotor(90), name: 'Rear rotor', spec: 'Ø180 · 6-bolt', local: true },
+  { id: 'cassette', home: REAR, hp: () => P.rear, r: 115, draw: drawCassette, name: 'Cassette', spec: '10–52T 12-spd', local: true },
+  { id: 'crankset', home: BB, r: 200, draw: drawCrankset, name: 'Crankset', spec: '32T NW · 170', local: true },
+  { id: 'derailleur', home: [30, -85], r: 90, draw: drawDerailleur, name: 'Derailleur', spec: 'Clutch 12-spd' },
+  { id: 'cockpit', home: FX([1040, 585]), r: 90, draw: drawCockpit, name: 'Cockpit', spec: '800 bar · 40 stem' },
+  { id: 'dropper', home: [290, 600], r: 140, draw: drawDropper, name: 'Dropper post', spec: '170 mm drop' },
+];
+PARTS.forEach((p, i) => p.item = i + 1);
+// where each part gets labelled on the assembled bike: anchor point in bike space, leader angle (deg), leader length (px)
+const TAGS = {
+  frame: [lerp2(ST, TT_END, 0.6), 75, 70], swingarm: [[150, 125], 165, 70], shock: [[560, 225], 35, 95], fork: [lerp2(CROWN, FRONT, 0.72), 5, 60],
+  frontWheel: [[1295 + 270, 270], 40, 50], rearWheel: [[-270, 270], 140, 50], rotorF: [[1295 - 60, -75], -115, 60],
+  rotorR: [[-55, -70], -115, 60], cassette: [[70, 75], 100, 150], crankset: [[440 + 60, -95], -70, 55],
+  derailleur: [[40, -160], -95, 45], cockpit: [FX([1050, 600]), 60, 45], dropper: [[230, 690], 120, 50],
+};
+function balloon(p0, bc, br, num, name, al, fs) {
+  const d = unit(p0, bc);
+  ctx.strokeStyle = C.dimA(0.85 * al); ctx.fillStyle = C.dimA(al); ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(...p0); ctx.lineTo(bc[0] - d[0] * br, bc[1] - d[1] * br); ctx.stroke();
+  ctx.beginPath(); ctx.arc(p0[0], p0[1], 2.2, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = C.ground; ctx.beginPath(); ctx.arc(bc[0], bc[1], br, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = C.dimA(al); ctx.font = `500 ${fs}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(String(num), bc[0], bc[1] + 0.5);
+  if (name) {
+    const left = d[0] < -0.2; ctx.textAlign = left ? 'right' : 'left'; ctx.font = `400 ${fs - 1}px ${FONT}`;
+    const tx = bc[0] + (left ? -br - 5 : br + 5), tw = ctx.measureText(name).width;
+    ctx.fillStyle = C.ground; ctx.fillRect(left ? tx - tw - 2 : tx - 2, bc[1] - fs / 2 - 1, tw + 4, fs + 2);
+    ctx.fillStyle = C.dimA(al); ctx.fillText(name, tx, bc[1] + 0.5);
+  }
+}
+function drawAssemblyCallouts(al) {
+  if (al < 0.01) return;
+  const fs = W < 600 ? 9 : 11, br = fs + 1;
+  if (!wide) { // narrow screens: compact balloons with names
+    const k = Math.min(1, S / 0.42);
+    for (const p of PARTS) {
+      const [anc, deg, len] = TAGS[p.id], ang = deg * Math.PI / 180;
+      const p0 = bikeToScreen(anc), L = len * k + br + 14;
+      balloon(p0, [p0[0] + Math.cos(ang) * L, p0[1] - Math.sin(ang) * L], br, p.item, p.name.toUpperCase(), al, fs);
+    }
+    return;
+  }
+  // wide screens: two label columns either side of the bike, sorted top to bottom so leaders don't cross
+  const items = PARTS.map(p => ({ p, a: bikeToScreen(TAGS[p.id][0]), ax: TAGS[p.id][0][0] })).sort((m, n) => m.ax - n.ax);
+  const cols = [items.slice(0, 7), items.slice(7)];
+  const bl = bikeToScreen([-420, 0])[0], brx = bikeToScreen([FRONT[0] + 420, 0])[0];
+  const y0 = A.y + A.h * 0.1, y1 = A.y + A.h * 0.86;
+  cols.forEach((col, ci) => {
+    const left = ci === 0;
+    col.sort((m, n) => m.a[1] - n.a[1]);
+    const bx = left ? bl - 18 - br : brx + 18 + br;
+    col.forEach((it, i) => {
+      const y = col.length === 1 ? (y0 + y1) / 2 : lerp(y0, y1, i / (col.length - 1));
+      const shoulder = [bx + (left ? br + 16 : -br - 16), y];
+      ctx.strokeStyle = C.dimA(0.75 * al); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(...it.a); ctx.lineTo(...shoulder); ctx.lineTo(bx + (left ? br : -br), y); ctx.stroke();
+      ctx.fillStyle = C.dimA(al); ctx.beginPath(); ctx.arc(it.a[0], it.a[1], 2.4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = C.ground; ctx.beginPath(); ctx.arc(bx, y, br, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = C.dimA(al); ctx.font = `500 ${fs}px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(String(it.p.item), bx, y + 0.5);
+      const tx = bx + (left ? -br - 8 : br + 8);
+      ctx.textAlign = left ? 'right' : 'left';
+      ctx.textBaseline = 'bottom'; ctx.font = `500 ${fs}px ${FONT}`; ctx.fillStyle = `rgba(210,218,221,${al})`;
+      ctx.fillText(it.p.name.toUpperCase(), tx, y - 1);
+      ctx.textBaseline = 'top'; ctx.font = `400 ${fs - 1}px ${FONT}`; ctx.fillStyle = `rgba(210,218,221,${0.6 * al})`;
+      ctx.fillText(it.p.spec, tx, y + 2);
+    });
+  });
+}
+const ORDER = ['rotorR', 'rearWheel', 'cassette', 'swingarm', 'shock', 'frame', 'dropper', 'fork', 'rotorF', 'frontWheel', 'cockpit', 'derailleur', 'crankset'];
+
+let slots = [];
+function layoutSlots() {
+  const aspect = A.w / A.h, cols = aspect > 1.3 ? 5 : aspect > 0.85 ? 4 : 3, rows = Math.ceil(PARTS.length / cols);
+  slots = [];
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++) slots.push([(i + 0.5) / cols, (j + 0.5) / rows]);
+}
+function shuffleSlots() {
+  const idx = [...slots.keys()].sort(() => Math.random() - 0.5);
+  PARTS.forEach((p, k) => {
+    p.slot = slots[idx[k]];
+    p.seed = Math.random() * 100;
+    p.fx = 0.16 + Math.random() * 0.22; p.fy = 0.14 + Math.random() * 0.22;
+    p.ax = 0.12 + Math.random() * 0.1; p.ay = 0.1 + Math.random() * 0.09;
+    p.spin = (Math.random() < 0.5 ? -1 : 1) * (0.12 + Math.random() * 0.35);
+    if (p.ang === undefined) p.ang = (Math.random() - 0.5) * 1.4;
+    p.target = 0;
+  });
+}
+const BIKE_C = [645, 170];
+let shake = [0, 0];
+const homeScreen = h => [A.cx + (h[0] - BIKE_C[0]) * S + shake[0], A.cy - (h[1] - BIKE_C[1]) * S + shake[1]];
+// world (mm) -> screen through the camera; bike space -> world through the frame's position, heave and pitch
+const ws = (wx, wy) => homeScreen([wx - camX + COMB[0], wy - camZ + COMB[1]]);
+function bikeWorld(p) {
+  const c = Math.cos(ride.th), s = Math.sin(ride.th), dx = p[0] - COMB[0], dy = p[1] - COMB[1];
+  return [ride.X + dx * c - dy * s, ride.z + dx * s + dy * c];
+}
+function bikeToScreen(p) { const w = bikeWorld(p); return ws(w[0], w[1]); }
+function drawTerrain(al) {
+  if (al < 0.01) return;
+  const pts = [];
+  for (let sx = A.x - 4; sx <= A.x + A.w + 4; sx += 3) {
+    const qx = (sx - A.cx) / S + BIKE_C[0], wx = qx + camX - COMB[0];
+    pts.push([sx, A.cy - (groundH(wx) - camZ + COMB[1] - BIKE_C[1]) * S]);
+  }
+  const bottom = A.y + A.h;
+  ctx.save(); ctx.globalAlpha = al;
+  ctx.beginPath(); ctx.moveTo(pts[0][0], bottom); for (const p of pts) ctx.lineTo(...p); ctx.lineTo(pts[pts.length - 1][0], bottom); ctx.closePath();
+  ctx.fillStyle = C.ground; ctx.fill();
+  ctx.save(); ctx.clip();                                    // section hatching, fixed to the ground
+  const step = 11, off = ((camX * S) % step + step) % step;
+  ctx.strokeStyle = C.thin; ctx.globalAlpha = al * 0.55; ctx.lineWidth = 1; ctx.beginPath();
+  for (let x = A.x - A.h - off; x < A.x + A.w + step; x += step) { ctx.moveTo(x, bottom); ctx.lineTo(x + A.h, A.y); }
+  ctx.stroke();
+  // buried stones in the soil section, fixed to the ground
+  const toS = ws;
+  const w0 = (A.x - A.cx) / S + BIKE_C[0] + camX - COMB[0], w1 = w0 + A.w / S, cell = 330;
+  ctx.globalAlpha = al; ctx.lineWidth = 1; ctx.strokeStyle = C.thin; ctx.fillStyle = C.ground;
+  for (let j = Math.floor(w0 / cell) - 1; j <= w1 / cell + 1; j++) {
+    const q = j * 3.7 + 50; if (hs2(q) < 0.35) continue;
+    const r = 18 + Math.pow(hs2(q + 0.2), 2) * 120, cx = j * cell + hs2(q + 0.4) * cell;
+    const cy = groundH(cx) - r * 0.6 - hs2(q + 0.6) * 700, n = 6 + Math.floor(hs2(q + 0.8) * 4), rot = hs2(q + 0.9) * 6.28;
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      const ang = rot + k / n * Math.PI * 2, rr = r * (0.65 + 0.35 * hs2(q + k * 1.31)), p = toS(cx + Math.cos(ang) * rr * 1.25, cy + Math.sin(ang) * rr * 0.8);
+      k ? ctx.lineTo(...p) : ctx.moveTo(...p);
+    }
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+  // the boulder: solid rock, outlined, with a buried base and a couple of fracture lines
+  for (const T of ride.segs) {
+    const lip = T.start + T.len;
+    const BX = T.bx || BOULDER_X;
+    if (lip + BX > w1 + 500 || lip + BX + 930 < w0 - 500) continue;
+    const bottom = trailH(T.len, T) - T.drop;
+    const base = v => { trailSeed = T.seed; return T.y0 + belowCliff(T.len + v, v, bottom, T); };
+    const top = BOULDER.map(([dx]) => { const v = BX + dx; return toS(lip + v, base(v) + boulderTop(v, T)); });
+    const under = [...BOULDER].reverse().map(([dx]) => { const v = BX + dx; return toS(lip + v, base(v) - 140 - 60 * Math.sin(Math.PI * dx / 930)); });
+    ctx.globalAlpha = al; ctx.fillStyle = C.ground; ctx.strokeStyle = C.line; ctx.lineWidth = 1.3;
+    ctx.beginPath(); [...top, ...under].forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p)); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.strokeStyle = C.thin; ctx.lineWidth = 1; ctx.beginPath();
+    const at = (dx, dy) => { const v = BX + dx; return toS(lip + v, base(v) + dy); };
+    ctx.moveTo(...at(250, 380)); ctx.lineTo(...at(300, 250)); ctx.lineTo(...at(280, 120)); ctx.lineTo(...at(340, 10));
+    ctx.moveTo(...at(600, 430)); ctx.lineTo(...at(560, 300)); ctx.lineTo(...at(620, 180));
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.globalAlpha = al; ctx.strokeStyle = C.line; ctx.lineWidth = 1.6; ctx.lineJoin = 'round';
+  ctx.beginPath(); pts.forEach((p, i) => i ? ctx.lineTo(...p) : ctx.moveTo(...p)); ctx.stroke();
+  ctx.font = `500 ${W < 600 ? 9 : 10}px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  const t = 'SECTION A–A · TRAIL PROFILE', tw = ctx.measureText(t).width + 10, ly = bottom - 14;
+  ctx.fillStyle = C.ground; ctx.fillRect(A.x + 6, ly - 8, tw, 16);
+  ctx.fillStyle = C.dim; ctx.fillText(t, A.x + 11, ly);
+  ctx.restore();
+}
+
+/* ---------- timeline ---------- */
+// ride: labels, trail, kicker, cliff → front wheel hits the boulder → crash: the bike comes apart against it and the parts fall and settle
+// → reassemble: parts lift off the ground and fly back together on the run-out → next ride
+const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+const DUR = { crash: 4.0, reassemble: 2.6 }, RIDE_TIMEOUT = 20;
+let state = 'ride', st = 0, crash = null;
+function assembly() { return state === 'ride' ? 1 : state === 'reassemble' ? ease(Math.min(1, st / DUR.reassemble)) : 0; }
+// collision outline of each part: points in bike space (or around the axle for wheel-centred parts)
+const ring12 = r => Array.from({ length: 12 }, (_, i) => [Math.cos(i * Math.PI / 6) * r, Math.sin(i * Math.PI / 6) * r]);
+const SADDLE = along(ST, POST_DIR, 185);
+const HULL = {
+  frontWheel: ring12(390), rearWheel: ring12(390), rotorF: ring12(102), rotorR: ring12(91), cassette: ring12(112),
+  crankset: [...ring12(72), [170, 0], [-170, 0]],
+  frame: [BB, ST, TT_END, HT_TOP, HT_BOT, DT_END, [ST[0] + 120, ST[1] - 20], lerp2(BB, DT_END, 0.5)],
+  swingarm: [PIVOT, REAR, ROCK[0], ROCK[1], ROCK[2], lerp2(PIVOT, REAR, 0.5)],
+  shock: [SHOCK_A, SHOCK_B, lerp2(SHOCK_A, SHOCK_B, 0.5)],
+  fork: [CROWN, HT_TOP, FRONT, lerp2(CROWN, FRONT, 0.5)],
+  cockpit: [HT_TOP, FX([1040, 585]), FX([1002, 612]), FX([1102, 566])],
+  dropper: [ST, SADDLE, [SADDLE[0] - 150, SADDLE[1] + 30], [SADDLE[0] + 160, SADDLE[1] + 14]],
+  derailleur: [[18, -12], [62, -36], [15, -75], [40, -145], [62, -50]],
+};
+function setState(s) {
+  state = s; st = 0;
+  if (s === 'ride') { // lay the next stretch of trail ahead, starting flat where the bike stands
+    const L = V * SLOWMO, fs = ride.X + L * 4.9 + 648;
+    const seg = { s: fs - LEAD, start: fs, len: L * 5.8, drop: 2600, seed: Math.random() * 100 };
+    seg.y0 = groundH(seg.s);
+    ride.segs.push(seg); if (ride.segs.length > 3) ride.segs.shift();
+    ride.trail = seg;
+    rideReset(groundH(ride.X));
+  }
+  if (s === 'crash') { // the front wheel stops dead against the boulder and the bike comes apart around it
+    const c0 = crash ? crash.w : [ride.X + 648, ride.z];
+    debris = burst(c0[0], c0[1] + 40, 34, true).concat(burst(c0[0] - 150, c0[1] + 250, 16, false));
+    crashZoom = zoom;
+    for (const p of PARTS) {
+      const piv = p.hp ? p.hp() : p.home, w = bikeWorld(piv);
+      const hull = HULL[p.id].map(q => p.local ? q : [q[0] - piv[0], q[1] - piv[1]]);
+      const rr = Math.max(60, ...hull.map(q => Math.hypot(q[0], q[1])));
+      // velocity this point had as part of the moving bike
+      const vx0 = ride.v - ride.vth * (w[1] - ride.z), vy0 = ride.vz + ride.vth * (w[0] - ride.X);
+      // the nearer the front, the more the boulder stops it; the back of the bike carries on into the wreck
+      const d = clamp(piv[0] / FRONT[0], 0, 1), keep = lerp(0.7, p.id === 'frontWheel' ? -0.05 : 0.12, d);
+      p.b = { x: w[0], y: w[1], a: ride.th, hull, I: (rr * 0.55) ** 2,
+        vx: vx0 * keep + (Math.random() - 0.5) * 700,
+        vy: Math.min(0, vy0) * 0.3 + 250 + Math.random() * (500 + 700 * d),   // a small jolt up, then gravity takes it
+        w: ride.vth * 0.5 - (0.8 + Math.random() * 2.6) * (Math.random() < 0.8 ? 1 : -1) * (p.local ? 0.6 : 1) };
+    }
+  }
+  if (s === 'reassemble') { // the bike rebuilds on the flat run-out past the boulder
+    for (const p of PARTS) { p.from = { x: p.b.x, y: p.b.y, a: p.b.a }; p.target = Math.round(p.b.a / (Math.PI * 2)) * Math.PI * 2; }
+    camFrom = [camX, camZ];
+    const T = ride.trail; ride.X = T.start + T.len + runout(T) + 1900;
+    rideReset(groundH(ride.X)); P = pose();
+  }
+}
+function burst(x, y, n, rock) { // rock chips off the boulder, or bolts and shards off the bike
+  return Array.from({ length: n }, () => {
+    const ang = Math.PI * (0.05 + Math.random() * 0.9), sp = (rock ? 2500 : 1500) + Math.random() * (rock ? 6500 : 4500), big = rock && Math.random() < 0.35;
+    return { x, y, vx: Math.cos(ang) * sp * (Math.random() < 0.3 ? -0.6 : 1), vy: Math.sin(ang) * sp, a: Math.random() * 6.28, w: (Math.random() - 0.5) * 30,
+      r: big ? 18 + Math.random() * 30 : rock ? 5 + Math.random() * 10 : 4 + Math.random() * 8, n: 3 + Math.floor(Math.random() * 3), shard: !big && Math.random() < (rock ? 0.5 : 0.7) };
+  });
+}
+const FALL_ZOOM = 0.6; // camera pulls back this far for the drop
+function debrisStep(h) {
+  for (const d of debris) {
+    d.life += h; d.vy -= GRAV * h; d.x += d.vx * h; d.y += d.vy * h; d.a += d.w * h;
+    const g = groundH(d.x);
+    if (d.y - d.r * 0.5 < g) { d.y = g + d.r * 0.5; if (d.vy < 0) d.vy *= -0.3; d.vx *= 0.6; d.w *= 0.6; }
+  }
+}
+function drawDebris() {
+  if (state !== 'crash' || !debris.length) return;
+  const al = 1 - smooth(DUR.crash - 1.2, DUR.crash - 0.2, st);
+  ctx.save(); ctx.globalAlpha = al; ctx.lineWidth = 1; ctx.lineJoin = 'round';
+  for (const d of debris) {
+    const c = ws(d.x, d.y), r = d.r * S;
+    ctx.beginPath();
+    if (d.shard) { ctx.moveTo(c[0] - Math.cos(d.a) * r * 1.6, c[1] - Math.sin(d.a) * r * 1.6); ctx.lineTo(c[0] + Math.cos(d.a) * r * 1.6, c[1] + Math.sin(d.a) * r * 1.6); ctx.strokeStyle = C.thin; ctx.stroke(); continue; }
+    for (let k = 0; k < d.n; k++) { const t = d.a + k / d.n * 6.28, rr = r * (0.7 + 0.3 * ((k * 7) % 3) / 2); k ? ctx.lineTo(c[0] + Math.cos(t) * rr, c[1] + Math.sin(t) * rr) : ctx.moveTo(c[0] + Math.cos(t) * rr, c[1] + Math.sin(t) * rr); }
+    ctx.closePath(); ctx.fillStyle = C.ground; ctx.fill(); ctx.strokeStyle = C.line; ctx.stroke();
+  }
+  ctx.restore();
+}
+// loose parts: gravity, then push out of the ground with a bouncy, frictional contact at the lowest point
+function crashStep(h) {
+  for (const p of PARTS) {
+    const b = p.b;
+    b.vy -= GRAV * h; b.x += b.vx * h; b.y += b.vy * h; b.a += b.w * h;
+    const c = Math.cos(b.a), sn = Math.sin(b.a);
+    let pen = 0, rx = 0, ry = 0;
+    for (const q of b.hull) {
+      const qx = q[0] * c - q[1] * sn, qy = q[0] * sn + q[1] * c, d = b.y + qy - groundH(b.x + qx);
+      if (d < pen) { pen = d; rx = qx; ry = qy; }
+    }
+    if (pen < 0) {
+      b.y -= pen;
+      const vcy = b.vy + b.w * rx;
+      if (vcy < 0) {
+        const j = -1.4 * vcy / (1 + rx * rx / b.I);
+        b.vy += j; b.w += rx * j / b.I;
+        const vt = b.vx - b.w * ry, lim = 0.85 * j;
+        const jt = clamp(-vt / (1 + ry * ry / b.I), -lim, lim);
+        b.vx += jt; b.w -= ry * jt / b.I;
+      }
+      const round = p.id === 'rotorF' || p.id === 'rotorR' || p.id === 'cassette' || p.id === 'frontWheel' || p.id === 'rearWheel'; // would roll away
+      b.vx *= 1 - (round ? 6 : 4) * h; b.w *= 1 - (round ? 9 : 4) * h;   // dig in, scrape and settle
+    }
+  }
+}
+
+/* ---------- sheet: border, zones, grid ---------- */
+function drawSheet() {
+  ctx.fillStyle = C.ground; ctx.fillRect(0, 0, W, H);
+  // model-space grid inside the viewport
+  ctx.save(); ctx.beginPath(); ctx.rect(A.x, A.y, A.w, A.h); ctx.clip();
+  const gs = 40, p = new Path2D();
+  for (let x = A.x + ((A.w / 2) % gs); x < A.x + A.w; x += gs) { p.moveTo(x, A.y); p.lineTo(x, A.y + A.h); }
+  for (let y = A.y + ((A.h / 2) % gs); y < A.y + A.h; y += gs) { p.moveTo(A.x, y); p.lineTo(A.x + A.w, y); }
+  ctx.lineWidth = 1; ctx.strokeStyle = C.grid; ctx.stroke(p); ctx.restore();
+  // border with zones (ISO 5457: numbers left to right, letters top to bottom)
+  const { mo, mi } = frameR;
+  ctx.strokeStyle = C.border; ctx.lineWidth = 1; ctx.strokeRect(mo + 0.5, mo + 0.5, W - 2 * mo - 1, H - 2 * mo - 1);
+  ctx.lineWidth = 1.6; ctx.strokeRect(mi, mi, W - 2 * mi, H - 2 * mi);
+  const nc = Math.max(4, Math.round(W / 220)), nr = Math.max(3, Math.round(H / 220));
+  ctx.font = `500 ${W < 600 ? 8 : 10}px ${FONT}`; ctx.fillStyle = C.dim; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineWidth = 1; ctx.beginPath();
+  for (let i = 0; i < nc; i++) {
+    const x0 = mi + (W - 2 * mi) * i / nc, xm = mi + (W - 2 * mi) * (i + 0.5) / nc;
+    if (i) { ctx.moveTo(x0, mo); ctx.lineTo(x0, mi); ctx.moveTo(x0, H - mi); ctx.lineTo(x0, H - mo); }
+    ctx.fillText(String(i + 1), xm, (mo + mi) / 2); ctx.fillText(String(i + 1), xm, H - (mo + mi) / 2);
+  }
+  for (let j = 0; j < nr; j++) {
+    const y0 = mi + (H - 2 * mi) * j / nr, ym = mi + (H - 2 * mi) * (j + 0.5) / nr, L = String.fromCharCode(65 + j);
+    if (j) { ctx.moveTo(mo, y0); ctx.lineTo(mi, y0); ctx.moveTo(W - mi, y0); ctx.lineTo(W - mo, y0); }
+    ctx.fillText(L, (mo + mi) / 2, ym); ctx.fillText(L, W - (mo + mi) / 2, ym);
+  }
+  ctx.stroke();
+  // centring marks
+  ctx.beginPath(); ctx.moveTo(W / 2, mo); ctx.lineTo(W / 2, mi + 8); ctx.moveTo(W / 2, H - mo); ctx.lineTo(W / 2, H - mi - 8);
+  ctx.moveTo(mo, H / 2); ctx.lineTo(mi + 8, H / 2); ctx.moveTo(W - mo, H / 2); ctx.lineTo(W - mi - 8, H / 2); ctx.lineWidth = 1.6; ctx.stroke();
+}
+
+/* ---------- dimensions (screen space) ---------- */
+function arrowHead(p, dir) {
+  const n = [-dir[1], dir[0]], L = 8, w = 2.4;
+  ctx.beginPath(); ctx.moveTo(p[0], p[1]);
+  ctx.lineTo(p[0] - dir[0] * L + n[0] * w, p[1] - dir[1] * L + n[1] * w);
+  ctx.lineTo(p[0] - dir[0] * L - n[0] * w, p[1] - dir[1] * L - n[1] * w); ctx.closePath(); ctx.fill();
+}
+function dimText(t, x, y, al) {
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const w = ctx.measureText(t).width + 8;
+  ctx.fillStyle = C.ground; ctx.fillRect(x - w / 2, y - 7, w, 14);
+  ctx.fillStyle = C.dimA(al); ctx.fillText(t, x, y);
+}
+function hDim(P1, P2, y, text, al) {
+  const s = Math.sign(y - P1[1]) || 1;
+  ctx.beginPath();
+  ctx.moveTo(P1[0], P1[1] + s * 6); ctx.lineTo(P1[0], y + s * 6);
+  ctx.moveTo(P2[0], P2[1] + s * 6); ctx.lineTo(P2[0], y + s * 6);
+  ctx.moveTo(P1[0], y); ctx.lineTo(P2[0], y); ctx.stroke();
+  arrowHead([P1[0], y], [-1, 0]); arrowHead([P2[0], y], [1, 0]);
+  dimText(text, (P1[0] + P2[0]) / 2, y, al);
+}
+function angDim(V, r, a0, a1, text, al) {
+  const c = bikeToScreen(V), R = r * S;
+  ctx.beginPath();
+  for (const a of [a0, a1]) { ctx.moveTo(c[0] + Math.cos(a) * 6, c[1] - Math.sin(a) * 6); ctx.lineTo(c[0] + Math.cos(a) * (R + 12), c[1] - Math.sin(a) * (R + 12)); }
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(c[0], c[1], R, -a1, -a0); ctx.stroke();
+  arrowHead([c[0] + Math.cos(a0) * R, c[1] - Math.sin(a0) * R], [-Math.sin(a0), -Math.cos(a0)]);
+  arrowHead([c[0] + Math.cos(a1) * R, c[1] - Math.sin(a1) * R], [Math.sin(a1), Math.cos(a1)]);
+  const m = (a0 + a1) / 2; dimText(text, c[0] + Math.cos(m) * (R + 18), c[1] - Math.sin(m) * (R + 18), al);
+}
+function drawDims(al) {
+  if (al <= 0.01) return;
+  ctx.save();
+  ctx.font = `500 ${W < 600 ? 9 : 11}px ${FONT}`;
+  ctx.strokeStyle = C.dimA(al * 0.9); ctx.fillStyle = C.dimA(al); ctx.lineWidth = 1;
+  const R = bikeToScreen(P.rear), F = bikeToScreen(P.front), B = bikeToScreen(BB);
+  hDim(R, F, bikeToScreen([0, -500])[1], String(FRONT[0] - REAR[0]), al);
+  ctx.strokeStyle = C.dimA(al * 0.9); ctx.fillStyle = C.dimA(al);
+  hDim(R, B, bikeToScreen([0, -430])[1], String(BB[0] - REAR[0]), al);
+  ctx.strokeStyle = C.dimA(al * 0.9); ctx.fillStyle = C.dimA(al);
+  angDim(HT_TOP, 120, Math.PI - HA, Math.PI, '65°', al);
+  ctx.strokeStyle = C.dimA(al * 0.9); ctx.fillStyle = C.dimA(al);
+  angDim(BB, 150, Math.PI - SEAT_ANGLE * Math.PI / 180, Math.PI, Math.round(SEAT_ANGLE) + '°', al);
+  // diameter leader on the front wheel
+  ctx.strokeStyle = C.dimA(al * 0.9); ctx.fillStyle = C.dimA(al);
+  const a = 0.75, p0 = bikeToScreen([P.front[0] + Math.cos(a) * 382, P.front[1] + Math.sin(a) * 382]);
+  const p1 = [p0[0] + 34, p0[1] - 34];
+  ctx.beginPath(); ctx.moveTo(...p0); ctx.lineTo(...p1); ctx.lineTo(p1[0] + 26, p1[1]); ctx.stroke();
+  arrowHead(p0, [-Math.SQRT1_2, Math.SQRT1_2]);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText('Ø764', p1[0] + 30, p1[1]);
+  ctx.restore();
+}
+
+/* ---------- parts ---------- */
+function drawParts(a) {
+  const states = PARTS.map(p => {
+    let pos, rot;
+    if (state === 'ride') { pos = bikeToScreen(p.hp ? p.hp() : p.home); rot = -ride.th; }
+    else if (state === 'crash') { pos = ws(p.b.x, p.b.y); rot = -p.b.a; }
+    else {
+      const hw = bikeWorld(p.hp ? p.hp() : p.home);
+      pos = ws(lerp(p.from.x, hw[0], a), lerp(p.from.y, hw[1], a) + Math.sin(Math.PI * a) * 520); // lift off the ground, arc home
+      rot = -lerp(p.from.a, p.target, a);
+    }
+    return { p, pos, rot, sc: S };
+  });
+  ctx.save(); ctx.beginPath(); ctx.rect(A.x, A.y, A.w, A.h); ctx.clip();
+  drawTerrain(1);
+  for (const id of ORDER) {
+    const s = states.find(x => x.p.id === id);
+    ctx.save();
+    ctx.translate(...s.pos); ctx.rotate(s.rot); ctx.scale(s.sc, -s.sc);
+    if (!s.p.local) ctx.translate(-s.p.home[0], -s.p.home[1]);
+    U = 1 / s.sc;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (id === 'crankset' && state !== 'crash' && a > 0.85) { ctx.save(); ctx.translate(-BB[0], -BB[1]); drawChain((a - 0.85) / 0.15); ctx.restore(); }
+    s.p.draw();
+    ctx.restore();
+  }
+  drawDebris();
+  // impact marker where the front wheel hit
+  const tm = crash ? time - crash.t0 : 99;
+  if (state === 'crash' && tm < 2.6) {
+    const al = 1 - tm / 2.6, r = 14 + tm * 110;
+    [crash.x, crash.y] = ws(...crash.w);
+    ctx.strokeStyle = C.centerA(al); ctx.lineWidth = 1;
+    ctx.setLineDash([6, 4]); ctx.beginPath(); ctx.arc(crash.x, crash.y, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(crash.x, crash.y, r * 0.55, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
+    if (tm < 0.6) { // burst lines
+      const k = tm / 0.6; ctx.beginPath();
+      for (let i = 0; i < 14; i++) { const t = i / 14 * Math.PI * 2 + 0.2, r0 = 20 + k * 90, r1 = r0 + 40 * (1 - k) + 12; ctx.moveTo(crash.x + Math.cos(t) * r0, crash.y + Math.sin(t) * r0); ctx.lineTo(crash.x + Math.cos(t) * r1, crash.y + Math.sin(t) * r1); }
+      ctx.strokeStyle = C.centerA(1 - k); ctx.lineWidth = 1.4; ctx.stroke(); ctx.lineWidth = 1; ctx.strokeStyle = C.centerA(al);
+    }
+    ctx.beginPath(); ctx.moveTo(crash.x - 12, crash.y); ctx.lineTo(crash.x + 12, crash.y); ctx.moveTo(crash.x, crash.y - 12); ctx.lineTo(crash.x, crash.y + 12); ctx.stroke();
+    const tx = crash.x + 30, ty = crash.y - 46;
+    ctx.beginPath(); ctx.moveTo(crash.x + 6, crash.y - 6); ctx.lineTo(tx - 4, ty + 4); ctx.lineTo(tx + 150, ty + 4); ctx.stroke();
+    ctx.font = `500 ${W < 600 ? 9 : 11}px ${FONT}`; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+    ctx.fillStyle = C.centerA(al); ctx.fillText('IMPACT · FRONT WHEEL INTO BOULDER', tx, ty);
+    ctx.fillStyle = C.dimA(al); ctx.textBaseline = 'top';
+    ctx.fillText(`vz ${crash.vz.toFixed(1)} m/s  ·  pitch ${crash.pitch}°`, tx, ty + 8);
+  }
+  ctx.restore();
+}
+
+/* ---------- parts list and title block ---------- */
+const today = (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; })();
+function cell(x, y, w, h, label, value, opts = {}) {
+  ctx.strokeStyle = C.border; ctx.lineWidth = 1; ctx.strokeRect(x + 0.5, y + 0.5, w, h);
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+  if (label) { ctx.fillStyle = C.dim; ctx.font = `400 8px ${FONT}`; ctx.fillText(label, x + 6, y + 4); }
+  if (value) { ctx.fillStyle = C.line; ctx.font = `${opts.weight || 500} ${opts.size || 11}px ${FONT}`; ctx.fillText(value, x + 6, y + (label ? 14 : (h - (opts.size || 11)) / 2)); }
+}
+function projectionSymbol(x, y, h) { // third-angle projection
+  ctx.strokeStyle = C.line; ctx.lineWidth = 1;
+  const s = h * 0.32, cx = x, cy = y;
+  ctx.beginPath(); ctx.moveTo(cx - s * 1.6, cy - s * 0.5); ctx.lineTo(cx - s * 0.2, cy - s); ctx.lineTo(cx - s * 0.2, cy + s); ctx.lineTo(cx - s * 1.6, cy + s * 0.5); ctx.closePath(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(cx + s * 1.3, cy, s, 0, Math.PI * 2); ctx.moveTo(cx + s * 1.3 + s * 0.5, cy); ctx.arc(cx + s * 1.3, cy, s * 0.5, 0, Math.PI * 2); ctx.stroke();
+  ctx.setLineDash([5, 2, 1, 2]); ctx.strokeStyle = C.center; ctx.beginPath(); ctx.moveTo(cx - s * 2, cy); ctx.lineTo(cx + s * 2.6, cy); ctx.stroke(); ctx.setLineDash([]);
+}
+function drawTables(a) {
+  const scale = '1:' + Math.max(1, Math.round(1 / (S * 0.2646)));
+  const view = state === 'ride' ? (st > 4.3 ? 'RIDE SIM · 0.55× SPEED' : 'GENERAL ASSEMBLY')
+    : state === 'crash' ? 'IMPACT · CRASH' : 'REASSEMBLING';
+  const clock = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  ctx.fillStyle = C.ground;
+  if (!wide) {
+    const { x0, x1, y0, y1 } = panel, w = x1 - x0, hh = (y1 - y0) / 2;
+    ctx.fillRect(x0, y0, w, y1 - y0);
+    cell(x0, y0, w * 0.7, hh, 'TITLE', 'TRAIL BIKE 29 IN · FS-150', { size: 10 });
+    cell(x0 + w * 0.7, y0, w * 0.3, hh, 'SCALE', scale, { size: 10 });
+    cell(x0, y0 + hh, w * 0.4, hh, 'DWG NO', 'MTB-29-150', { size: 10 });
+    cell(x0 + w * 0.4, y0 + hh, w * 0.6, hh, 'VIEW', view, { size: 10 });
+    return;
+  }
+  const { x0, x1, y0, y1 } = panel, w = x1 - x0;
+  const tbH = 164, ty = y1 - tbH;
+  ctx.fillRect(x0, y0, w, y1 - y0);
+  ctx.strokeStyle = C.border; ctx.lineWidth = 1.6; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x0, y1); ctx.stroke();
+  // title block
+  cell(x0, ty, w, 46, 'TITLE', 'FULL-SUSPENSION TRAIL BIKE, 29 IN', { size: 12 });
+  ctx.fillStyle = C.thin; ctx.font = `400 9px ${FONT}`; ctx.fillText('GENERAL ASSEMBLY & EXPLODED VIEW', x0 + 6, ty + 31);
+  const r2 = ty + 46, rh = 39;
+  cell(x0, r2, w * 0.46, rh, 'DWG NO', 'MTB-29-150');
+  cell(x0 + w * 0.46, r2, w * 0.18, rh, 'REV', 'C');
+  cell(x0 + w * 0.64, r2, w * 0.36, rh, 'PROJECTION', '');
+  projectionSymbol(x0 + w * 0.82, r2 + rh * 0.6, rh);
+  const r3 = r2 + rh;
+  cell(x0, r3, w * 0.3, rh, 'SCALE', scale);
+  cell(x0 + w * 0.3, r3, w * 0.22, rh, 'UNITS', 'MM');
+  cell(x0 + w * 0.52, r3, w * 0.48, rh, 'VIEW', view, { size: 10 });
+  const r4 = r3 + rh;
+  cell(x0, r4, w * 0.3, tbH - 46 - rh * 2, 'SHEET', '1 / 1');
+  cell(x0 + w * 0.3, r4, w * 0.4, tbH - 46 - rh * 2, 'DATE', today, { size: 10 });
+  cell(x0 + w * 0.7, r4, w * 0.3, tbH - 46 - rh * 2, 'TIME', clock, { size: 10 });
+  // parts list, item 1 at the bottom, header above
+  const rowsAvail = ty - y0 - 12, rowH = Math.min(20, Math.floor(rowsAvail / (PARTS.length + 1)));
+  if (rowH < 12) return;
+  const cw = [30, (w - 64) * 0.5, (w - 64) * 0.5, 34], cx = [x0, x0 + cw[0], x0 + cw[0] + cw[1], x0 + cw[0] + cw[1] + cw[2]];
+  const bottom = ty - 0, fsz = rowH >= 17 ? 10 : 9;
+  ctx.textBaseline = 'middle';
+  const rowAt = i => bottom - (i + 1) * rowH;
+  const highlight = a < 0.02;
+  PARTS.forEach((p, i) => {
+    const y = rowAt(i);
+    for (let k = 0; k < 4; k++) { ctx.strokeStyle = C.border; ctx.lineWidth = 1; ctx.strokeRect(cx[k] + 0.5, y + 0.5, cw[k], rowH); }
+    ctx.font = `500 ${fsz}px ${FONT}`; ctx.fillStyle = C.dim; ctx.textAlign = 'center'; ctx.fillText(String(p.item), cx[0] + cw[0] / 2, y + rowH / 2 + 0.5);
+    ctx.textAlign = 'left'; ctx.fillStyle = C.line; ctx.fillText(p.name.toUpperCase(), cx[1] + 6, y + rowH / 2 + 0.5);
+    ctx.font = `400 ${fsz}px ${FONT}`; ctx.fillStyle = C.thin; ctx.fillText(p.spec, cx[2] + 6, y + rowH / 2 + 0.5);
+    ctx.textAlign = 'center'; ctx.fillStyle = C.line; ctx.fillText('1', cx[3] + cw[3] / 2, y + rowH / 2 + 0.5);
+  });
+  const hy = rowAt(PARTS.length);
+  ['ITEM', 'DESCRIPTION', 'SPECIFICATION', 'QTY'].forEach((t, k) => {
+    ctx.strokeStyle = C.border; ctx.strokeRect(cx[k] + 0.5, hy + 0.5, cw[k], rowH);
+    ctx.font = `500 8px ${FONT}`; ctx.fillStyle = C.dim; ctx.textAlign = k === 0 || k === 3 ? 'center' : 'left';
+    ctx.fillText(t, k === 0 || k === 3 ? cx[k] + cw[k] / 2 : cx[k] + 6, hy + rowH / 2 + 0.5);
+  });
+  ctx.font = `500 9px ${FONT}`; ctx.fillStyle = C.dim; ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+  ctx.fillText('PARTS LIST', x0 + 6, hy - 4);
+  // notes at the top of the panel
+  const ny = y0 + 18;
+  if (hy - ny > 70) {
+    ctx.textBaseline = 'top'; ctx.fillStyle = C.dim; ctx.font = `500 9px ${FONT}`; ctx.fillText('NOTES', x0 + 6, ny);
+    ctx.fillStyle = C.thin; ctx.font = `400 9px ${FONT}`;
+    ['1. ALL DIMENSIONS IN MM UNLESS NOTED.', '2. GEOMETRY SHOWN AT 30% SAG.', '3. TORQUE AXLES TO SPEC BEFORE RIDING.']
+      .forEach((t, i) => ctx.fillText(t, x0 + 6, ny + 16 + i * 14));
+  }
+}
+
+/* ---------- loop ---------- */
+const hint = document.getElementById('hint');
+let last = performance.now();
+addEventListener('resize', resize); resize(); shuffleSlots(); setState('ride');
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000) * (reduced ? 0.4 : 1);
+  last = now; time += dt;
+  st += dt;
+  if (state === 'crash' && st >= DUR.crash) setState('reassemble');
+  else if (state === 'reassemble' && st >= DUR.reassemble) setState('ride');
+  if (state === 'ride') {
+    const n = 10, h = dt * SLOWMO / n, cliff = ride.trail.start + ride.trail.len;
+    let landed = null;
+    for (let i = 0; i < n; i++) {
+      const vz = ride.vz;
+      rideStep(h);
+      const fx = ride.X + 648 * Math.cos(ride.th), T = ride.trail;
+      if (!T.bxSet && fx > cliff) { // takeoff: put the boulder where the front wheel is going to come down
+        T.bx = clamp(predictTouchdown(cliff, T) + BX_OFFSET, FACE + 300, 9000); T.bxSet = true;
+      }
+      // crash: the front wheel's first touchdown after going off the drop (it lands nose-first on the boulder)
+      if (fx > cliff + 520 && ride.sf > 0) { landed = { vz: vz / 1000, pitch: Math.round(ride.th * 180 / Math.PI) }; break; }
+    }
+    const lead = Math.min(0, ride.vz) * 0.3;                   // look ahead when falling
+    ride.camZ += (ride.z + lead - ride.camZ) * Math.min(1, dt * 4);
+    ride.camZ = clamp(ride.camZ, ride.z - 700, ride.z + 250); // never let the bike leave the viewport
+    camX = ride.X; camZ = ride.camZ;
+    if (landed) {
+      P = pose();
+      crash = { w: bikeWorld([P.front[0] + R_TIRE * 0.7, P.front[1] - R_TIRE * 0.3]), t0: time, ...landed };
+      setState('crash');
+    } else if (st > RIDE_TIMEOUT) { crash = { w: bikeWorld([P.front[0], P.front[1] - R_TIRE]), t0: time, vz: 0, pitch: 0 }; setState('crash'); }
+  } else if (state === 'crash') {
+    const speed = st < 0.08 ? 0.1 : 1.0;                    // a beat on the impact, then real time
+    const n = 10, h = dt * speed / n;
+    for (let i = 0; i < n; i++) { crashStep(h); debrisStep(h); }
+    let x0 = Infinity, x1 = -Infinity, my = 0; for (const p of PARTS) { x0 = Math.min(x0, p.b.x); x1 = Math.max(x1, p.b.x); my += p.b.y / PARTS.length; }
+    const k = Math.min(1, dt * 1.6); camX += ((x0 + x1) / 2 - camX) * k; camZ += (my + 150 - camZ) * k; // frame the whole wreck
+    const fit = clamp(A.w * 0.9 / ((x1 - x0 + 1100) * S0), 0.24, 0.85);   // zoom out far enough to see every part
+    crashZoom += (fit - crashZoom) * Math.min(1, dt * 2.5);
+  } else {
+    const e = ease(Math.min(1, st / DUR.reassemble));
+    camX = lerp(camFrom[0], ride.X, e); camZ = lerp(camFrom[1], ride.camZ, e);
+  }
+  // camera shake: a hard jolt at impact that dies away
+  if (state === 'crash') { const m = 22 * Math.exp(-st * 5) * (st < 1.2 ? 1 : 0); shake = [(Math.random() - 0.5) * 2 * m, (Math.random() - 0.5) * 2 * m]; }
+  else shake = [0, 0];
+  const a = assembly();
+  P = pose();
+  wheelRot -= dt * (state === 'ride' ? ride.v * SLOWMO / R_TIRE : state === 'reassemble' ? 1.2 * a : 0);
+  crank -= dt * (state === 'ride' ? 3.4 : 0);
+  const introAl = state === 'ride' ? smooth(0.3, 1.1, st) * (1 - smooth(3.3, 3.8, st)) : 0; // labels + dims on the still bike, before the trail
+  // on wide screens the intro is drawn smaller to leave room for the label columns, then zooms in for the ride
+  const zi = wide ? clamp((A.w - 2 * 175) / ((FRONT[0] + 840) * S0), 0.5, 0.75) : 1;
+  zoom = state === 'reassemble' ? lerp(crashZoom, zi, a) : state === 'ride' ? lerp(zi, 1, smooth(3.6, 4.5, st)) * lerp(1, FALL_ZOOM, smooth(-1800, 200, ride.X - ride.trail.start - ride.trail.len)) // pull back for the drop
+    : crashZoom;
+  S = S0 * zoom;
+  const dimAl = introAl;
+
+  drawSheet();
+  drawParts(a);
+  ctx.save(); ctx.beginPath(); ctx.rect(A.x, A.y, A.w, A.h); ctx.clip(); drawAssemblyCallouts(introAl); ctx.restore();
+  ctx.save(); ctx.beginPath(); ctx.rect(A.x, A.y, A.w, A.h); ctx.clip(); drawDims(dimAl); ctx.restore();
+  if (showTables || !wide) drawTables(a);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(t => { last = t; frame(t); });
+
+/* ---------- screensaver behaviour ---------- */
+setTimeout(() => hint.classList.add('fade'), 5000);
+let idleT;
+function poke() { document.body.classList.remove('idle'); clearTimeout(idleT); idleT = setTimeout(() => document.body.classList.add('idle'), 2500); }
+addEventListener('mousemove', poke); poke();
+addEventListener('click', () => {
+  try {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen?.().catch(() => {});
+    else document.exitFullscreen?.().catch(() => {});
+  } catch (e) {}
+});
+addEventListener('keydown', e => {
+  if (e.key === 'h' || e.key === 'H') {
+    showTables = !showTables;
+    if (wide) { // give the drawing the whole sheet while the tables are hidden
+      const mi = frameR.mi;
+      if (!showTables) { A = { x: mi + 10, y: mi + 10, w: W - 2 * mi - 20, h: H - 2 * mi - 20 }; A.cx = A.x + A.w / 2; A.cy = A.y + A.h / 2; S0 = Math.min(A.w * 0.88 / 2120, A.h * 0.88 / 1400); S = S0 * zoom; layoutSlots(); }
+      else resize();
+    }
+  }
+});
+async function wake() { try { await navigator.wakeLock?.request('screen'); } catch (e) {} }
+wake(); document.addEventListener('visibilitychange', () => { if (!document.hidden) wake(); });
+})();
+</script>
+
+
+</html>
